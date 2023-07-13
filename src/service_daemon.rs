@@ -44,6 +44,7 @@ use polling::Poller;
 use rand::prelude::*;
 use socket2::{SockAddr, Socket};
 use std::{
+    cell::RefCell,
     cmp,
     collections::{HashMap, HashSet},
     fmt,
@@ -82,7 +83,7 @@ pub enum UnregisterStatus {
 
 /// Different counters included in the metrics.
 /// Currently all counters are for outgoing packets.
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 enum Counter {
     Register,
     RegisterResend,
@@ -91,19 +92,13 @@ enum Counter {
     Browse,
     Respond,
     CacheRefreshQuery,
+    QuerySent,
+    QueryMissingSrv,
 }
 
 impl fmt::Display for Counter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Counter::Register => write!(f, "register"),
-            Counter::RegisterResend => write!(f, "register-resend"),
-            Counter::Unregister => write!(f, "unregister"),
-            Counter::UnregisterResend => write!(f, "unregister-resend"),
-            Counter::Browse => write!(f, "browse"),
-            Counter::Respond => write!(f, "respond"),
-            Counter::CacheRefreshQuery => write!(f, "cache-refresh"),
-        }
+        write!(f, "{:?}", self)
     }
 }
 
@@ -411,7 +406,8 @@ impl ServiceDaemon {
                 zc.increase_counter(Counter::Browse, 1);
 
                 let delay_ms = (next_delay * 1000) as u64;
-                let next_time = current_time_millis() + zc.rng.gen_range(delay_ms..delay_ms / 2);
+                let next_time =
+                    current_time_millis() + zc.rng.gen_range(delay_ms..delay_ms + delay_ms / 2);
                 let max_delay = 60 * 60;
                 let delay = cmp::min(next_delay * 2, max_delay);
                 zc.retransmissions.push(ReRun {
@@ -512,7 +508,7 @@ impl ServiceDaemon {
                 }
             },
 
-            Command::GetMetrics(resp_s) => match resp_s.send(zc.counters.clone()) {
+            Command::GetMetrics(resp_s) => match resp_s.send(zc.counters.borrow().clone()) {
                 Ok(()) => debug!("Sent metrics to the client"),
                 Err(e) => error!("Failed to send metrics: {}", e),
             },
@@ -612,7 +608,7 @@ struct Zeroconf {
     /// All repeating transmissions.
     retransmissions: Vec<ReRun>,
 
-    counters: Metrics,
+    counters: RefCell<Metrics>,
 
     /// Waits for incoming packets.
     poller: Poller,
@@ -658,7 +654,7 @@ impl Zeroconf {
             cache: DnsCache::new(),
             queriers: HashMap::new(),
             retransmissions: Vec::new(),
-            counters: HashMap::new(),
+            counters: RefCell::new(HashMap::new()),
             poller,
             monitors,
             service_name_len_max,
@@ -995,6 +991,7 @@ impl Zeroconf {
         debug!("Sending multicast query for {}", name);
         let mut out = DnsOutgoing::new(FLAGS_QR_QUERY);
         out.add_question(name, qtype);
+        self.increase_counter(Counter::QuerySent, 1);
         for (_, intf_sock) in self.intf_socks.iter() {
             // TODO(mcginty): evaluate
             self.send(&out, &self.broadcast_addr, intf_sock);
@@ -1070,6 +1067,7 @@ impl Zeroconf {
                         && valid_instance_name(&ptr.alias)
                         && now > ptr.get_record().get_created() + wait_in_millis
                     {
+                        self.increase_counter(Counter::QueryMissingSrv, 1);
                         self.send_query(&ptr.alias, TYPE_ANY);
                     }
                 }
@@ -1403,12 +1401,13 @@ impl Zeroconf {
     }
 
     /// Increases the value of `counter` by `count`.
-    fn increase_counter(&mut self, counter: Counter, count: i64) {
+    fn increase_counter(&self, counter: Counter, count: i64) {
         let key = counter.to_string();
-        match self.counters.get_mut(&key) {
+        let mut counters = self.counters.borrow_mut();
+        match counters.get_mut(&key) {
             Some(v) => *v += count,
             None => {
-                self.counters.insert(key, count);
+                counters.insert(key, count);
             }
         }
     }

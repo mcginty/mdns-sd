@@ -51,6 +51,12 @@ fn main() {
                 println!("At {:?} : {:?}", now.elapsed(), &other_event);
             }
         }
+        let rx = mdns.get_metrics().unwrap();
+        let metrics = rx.recv().unwrap();
+        println!("Metrics:");
+        for (name, value) in metrics {
+            println!("  {name}: {value}");
+        }
     }
 }
 
