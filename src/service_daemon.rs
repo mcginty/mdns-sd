@@ -41,6 +41,7 @@ use crate::{
 };
 use if_addrs::{IfAddr, Ifv4Addr};
 use polling::Poller;
+use rand::prelude::*;
 use socket2::{SockAddr, Socket};
 use std::{
     cmp,
@@ -129,6 +130,7 @@ impl ServiceDaemon {
         let (sender, receiver) = sync_channel(100);
 
         // Spawn the daemon thread
+        // TODO(mcginty): migrate eventually to tokio instead of threads
         thread::Builder::new()
             .name("mDNS_daemon".to_string())
             .spawn(move || Self::run(zc, receiver))
@@ -423,14 +425,14 @@ impl ServiceDaemon {
                 zc.increase_counter(Counter::Register, 1);
             }
 
-            Command::RegisterResend(fullname) => {
+            Command::RegisterResend(fullname, remaining) => {
                 debug!("announce service: {}", &fullname);
                 match zc.my_services.get(&fullname) {
                     Some(info) => {
                         let outgoing_addrs = zc.send_unsolicited_response(info);
                         if !outgoing_addrs.is_empty() {
                             zc.notify_monitors(DaemonEvent::Announce(
-                                fullname,
+                                fullname.clone(),
                                 format!("{:?}", &outgoing_addrs),
                             ));
                         }
@@ -438,12 +440,14 @@ impl ServiceDaemon {
                     }
                     None => debug!("announce: cannot find such service {}", &fullname),
                 }
-                let next_time = current_time_millis() + 3000;
-                // TODO(mcginty): resend register max number of times before responding to queries
-                // zc.retransmissions.push(ReRun {
-                //     next_time,
-                //     command: Command::RegisterResend(fullname),
-                });
+
+                if remaining > 0 {
+                    let next_time = current_time_millis() + zc.rng.gen_range(1000..1500);
+                    zc.retransmissions.push(ReRun {
+                        next_time,
+                        command: Command::RegisterResend(fullname, remaining - 1),
+                    });
+                }
             }
 
             Command::Unregister(fullname, resp_s) => {
@@ -617,6 +621,9 @@ struct Zeroconf {
 
     /// Options
     service_name_len_max: u8,
+
+    /// A cached RNG for quick jitter
+    rng: SmallRng,
 }
 
 impl Zeroconf {
@@ -654,6 +661,7 @@ impl Zeroconf {
             poller,
             monitors,
             service_name_len_max,
+            rng: SmallRng::from_entropy(),
         })
     }
 
@@ -787,14 +795,14 @@ impl Zeroconf {
         // RFC 6762 section 8.3.
         // ..The Multicast DNS responder MUST send at least two unsolicited
         //    responses, one second apart.
-        let next_time = current_time_millis() + 1000;
+        let next_time = current_time_millis() + self.rng.gen_range(1000..1500);
 
         // The key has to be lower case letter as DNS record name is case insensitive.
         // The info will have the original name.
         let service_fullname = info.get_fullname().to_lowercase();
         self.retransmissions.push(ReRun {
             next_time,
-            command: Command::RegisterResend(service_fullname.clone()),
+            command: Command::RegisterResend(service_fullname.clone(), 8),
         });
         self.my_services.insert(service_fullname, info);
     }
@@ -1452,7 +1460,7 @@ enum Command {
     Unregister(String, SyncSender<UnregisterStatus>), // (fullname)
 
     /// Announce again a service to local network
-    RegisterResend(String), // (fullname)
+    RegisterResend(String, usize), // (fullname)
 
     /// Resend unregister packet.
     UnregisterResend(Vec<u8>, Ipv4Addr), // (packet content)
