@@ -345,6 +345,7 @@ impl ServiceDaemon {
             let mut query_count = 0;
             for (ty_domain, _sender) in zc.queriers.iter() {
                 for instance in zc.cache.refresh_due(ty_domain).iter() {
+                    debug!("Refresh due for {instance}");
                     zc.send_query(instance, TYPE_ANY);
                     query_count += 1;
                 }
@@ -1286,6 +1287,7 @@ impl Zeroconf {
                 if qtype == TYPE_A || qtype == TYPE_ANY {
                     for service in self.my_services.values() {
                         if service.get_hostname() == question.entry.name.to_lowercase() {
+                            debug!("question matches our hostname {}", service.get_hostname());
                             let intf_addrs = service.get_addrs_on_intf(&intf_sock.intf);
                             if intf_addrs.is_empty() && qtype == TYPE_A {
                                 error!(
@@ -1317,6 +1319,7 @@ impl Zeroconf {
                 };
 
                 if qtype == TYPE_SRV || qtype == TYPE_ANY {
+                    debug!("adding answer {}", &question.entry.name);
                     out.add_answer(
                         &msg,
                         Box::new(DnsSrv::new(
@@ -1332,6 +1335,7 @@ impl Zeroconf {
                 }
 
                 if qtype == TYPE_TXT || qtype == TYPE_ANY {
+                    debug!("adding txt answer {}", &question.entry.name);
                     out.add_answer(
                         &msg,
                         Box::new(DnsTxt::new(
@@ -1372,6 +1376,8 @@ impl Zeroconf {
             self.send(&out, &self.broadcast_addr, intf_sock);
 
             self.increase_counter(Counter::Respond, 1);
+        } else {
+            debug!("Not sending an answer, query unrelated.")
         }
     }
 
@@ -1514,6 +1520,11 @@ impl DnsCache {
                 (i, false)
             }
             None => {
+                debug!(
+                    "adding new record to cache: ({} => {:?})",
+                    incoming.get_name(),
+                    incoming
+                );
                 record_vec.insert(0, incoming); // A new record.
                 (0, true)
             }
