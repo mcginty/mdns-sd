@@ -396,7 +396,7 @@ impl ServiceDaemon {
                     &ty, &addr_list
                 ))) {
                     error!(
-                        "Failed to send SearchStarted({})(repeating:{}): {}",
+                        "Failed to send SearchStarted({}) (repeating:{}): {}",
                         &ty, repeating, e
                     );
                     return;
@@ -410,7 +410,8 @@ impl ServiceDaemon {
                 zc.send_query(&ty, TYPE_PTR);
                 zc.increase_counter(Counter::Browse, 1);
 
-                let next_time = current_time_millis() + (next_delay * 1000) as u64;
+                let delay_ms = (next_delay * 1000) as u64;
+                let next_time = current_time_millis() + zc.rng.gen_range(delay_ms..delay_ms / 2);
                 let max_delay = 60 * 60;
                 let delay = cmp::min(next_delay * 2, max_delay);
                 zc.retransmissions.push(ReRun {
