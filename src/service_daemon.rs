@@ -319,11 +319,6 @@ impl ServiceDaemon {
                 Err(e) => error!("failed to select from sockets: {}", e),
             }
 
-            // Send out additional queries for unresolved instances, where
-            // the early responses did not have SRV records.
-            // TODO(mcginty): evaluate
-            zc.query_missing_srv();
-
             // process commands from the command channel
             match receiver.try_recv() {
                 Ok(Command::Exit) => {
@@ -1053,26 +1048,6 @@ impl Zeroconf {
         }
 
         true
-    }
-
-    /// Sends TYPE_ANY query for instances that're missing SRV records.
-    fn query_missing_srv(&mut self) {
-        let now = current_time_millis();
-        let wait_in_millis = 800; // The threshold for deeming SRV missing.
-
-        for records in self.cache.ptr.values() {
-            for record in records.iter() {
-                if let Some(ptr) = record.any().downcast_ref::<DnsPointer>() {
-                    if !self.cache.srv.contains_key(&ptr.alias)
-                        && valid_instance_name(&ptr.alias)
-                        && now > ptr.get_record().get_created() + wait_in_millis
-                    {
-                        self.increase_counter(Counter::QueryMissingSrv, 1);
-                        self.send_query(&ptr.alias, TYPE_ANY);
-                    }
-                }
-            }
-        }
     }
 
     /// Checks if `ty_domain` has records in the cache. If yes, sends the
