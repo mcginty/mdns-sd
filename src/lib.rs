@@ -1,4 +1,4 @@
-//! A small and safe library for Multicast DNS-SD (Service Discovery).
+//! A small library for Multicast DNS-SD (Service Discovery).
 //!
 //! This library creates one new thread to run a mDNS daemon, and exposes
 //! its API that interacts with the daemon via a
@@ -128,6 +128,3 @@ pub use service_daemon::{
     SERVICE_NAME_LEN_MAX_DEFAULT,
 };
 pub use service_info::{AsIpv4Addrs, IntoTxtProperties, ServiceInfo, TxtProperties, TxtProperty};
-
-/// A handler to receive messages from [ServiceDaemon]. Re-export from `flume` crate.
-pub use flume::Receiver;
