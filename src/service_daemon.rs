@@ -148,7 +148,7 @@ impl ServiceDaemon {
             .try_send(Command::Browse(service_type.to_string(), 1, resp_s))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::send failed: {}", e),
+                e => e_fmt!("channel::send failed: {}", e),
             })?;
         Ok(resp_r)
     }
@@ -162,7 +162,7 @@ impl ServiceDaemon {
             .try_send(Command::StopBrowse(ty_domain.to_string()))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::send failed: {}", e),
+                e => e_fmt!("channel::send failed: {}", e),
             })?;
         Ok(())
     }
@@ -184,7 +184,7 @@ impl ServiceDaemon {
             .try_send(Command::Register(service_info))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::send failed: {}", e),
+                e => e_fmt!("channel::send failed: {}", e),
             })?;
         Ok(())
     }
@@ -202,7 +202,7 @@ impl ServiceDaemon {
             .try_send(Command::Unregister(fullname.to_lowercase(), resp_s))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::send failed: {}", e),
+                e => e_fmt!("channel::send failed: {}", e),
             })?;
         Ok(resp_r)
     }
@@ -228,7 +228,7 @@ impl ServiceDaemon {
     pub fn shutdown(&self) -> Result<()> {
         self.sender.try_send(Command::Exit).map_err(|e| match e {
             TrySendError::Full(_) => Error::Again,
-            e => e_fmt!("flume::channel::send failed: {}", e),
+            e => e_fmt!("channel::send failed: {}", e),
         })
     }
 
@@ -242,7 +242,7 @@ impl ServiceDaemon {
             .try_send(Command::GetMetrics(resp_s))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::try_send failed: {}", e),
+                e => e_fmt!("channel::try_send failed: {}", e),
             })?;
         Ok(resp_r)
     }
@@ -267,7 +267,7 @@ impl ServiceDaemon {
             .try_send(Command::SetOption(DaemonOption::ServiceNameLenMax(len_max)))
             .map_err(|e| match e {
                 TrySendError::Full(_) => Error::Again,
-                e => e_fmt!("flume::channel::send failed: {}", e),
+                e => e_fmt!("channel::send failed: {}", e),
             })
     }
 
@@ -989,7 +989,6 @@ impl Zeroconf {
         out.add_question(name, qtype);
         self.increase_counter(Counter::QuerySent, 1);
         for (_, intf_sock) in self.intf_socks.iter() {
-            // TODO(mcginty): evaluate
             self.send(&out, &self.broadcast_addr, intf_sock);
         }
     }
@@ -1142,6 +1141,32 @@ impl Zeroconf {
         );
         let now = current_time_millis();
 
+        // If we aren't browsing specifically for the subtype in the response's PTR, ignore.
+        // Also, if there is no PTR, ignore.
+        match msg
+            .answers
+            .iter()
+            .find_map(|record| record.any().downcast_ref::<DnsPointer>())
+        {
+            Some(answer) => {
+                if !self
+                    .queriers
+                    .keys()
+                    .any(|query| answer.alias.ends_with(query))
+                {
+                    debug!(
+                        "Response had alias {}, but no querier exists. ignoring.",
+                        answer.alias
+                    );
+                    return;
+                }
+            }
+            None => {
+                debug!("Response had no PTR record, ignoring.");
+                return;
+            }
+        }
+
         // remove records that are expired.
         msg.answers.retain(|record| {
             if !record.get_record().is_expired(now) {
@@ -1258,6 +1283,7 @@ impl Zeroconf {
             debug!("question: {:?}", &question);
             let qtype = question.entry.ty;
 
+            // TODO(mcginty): don't bother responding until the initial resends are done.
             if qtype == TYPE_PTR {
                 for service in self.my_services.values() {
                     if question.entry.name == service.get_type()
@@ -1372,7 +1398,6 @@ impl Zeroconf {
 
         if !out.answers.is_empty() {
             out.id = msg.id;
-            // TODO(mcginty): evaluate
             self.send(&out, &self.broadcast_addr, intf_sock);
 
             self.increase_counter(Counter::Respond, 1);
