@@ -427,7 +427,7 @@ impl ServiceDaemon {
             Command::RegisterResend(fullname, remaining) => {
                 debug!("announce service: {}", &fullname);
                 match zc.my_services.get(&fullname) {
-                    Some(info) => {
+                    Some((info, _broadcasted)) => {
                         let outgoing_addrs = zc.send_unsolicited_response(info);
                         if !outgoing_addrs.is_empty() {
                             zc.notify_monitors(DaemonEvent::Announce(
@@ -446,6 +446,10 @@ impl ServiceDaemon {
                         next_time,
                         command: Command::RegisterResend(fullname, remaining - 1),
                     });
+                } else {
+                    if let Some((_service, broadcasted)) = zc.my_services.get_mut(&fullname) {
+                        *broadcasted = true
+                    }
                 }
             }
 
@@ -456,7 +460,7 @@ impl ServiceDaemon {
                         error!("unregister: cannot find such service {}", &fullname);
                         UnregisterStatus::NotFound
                     }
-                    Some((_k, info)) => {
+                    Some((_k, (info, _broacasted))) => {
                         for (ipv4, intf_sock) in zc.intf_socks.iter() {
                             let packet = zc.unregister_service(&info, intf_sock);
                             // repeat for one time just in case some peers miss the message
@@ -599,7 +603,7 @@ struct Zeroconf {
     intf_socks: HashMap<Ipv4Addr, IntfSock>,
 
     /// Local registered services， keyed by service full names.
-    my_services: HashMap<String, ServiceInfo>,
+    my_services: HashMap<String, (ServiceInfo, bool)>,
 
     /// Well-known mDNS IPv4 address and port
     broadcast_addr: SockAddr,
@@ -694,7 +698,7 @@ impl Zeroconf {
 
     /// Add `addr` in my services that enabled `addr_auto`.
     fn add_addr_in_my_services(&mut self, addr: Ipv4Addr) {
-        for (_, service_info) in self.my_services.iter_mut() {
+        for (_, (service_info, _broadcasted)) in self.my_services.iter_mut() {
             if service_info.is_addr_auto() {
                 service_info.insert_ipv4addr(addr);
             }
@@ -703,7 +707,7 @@ impl Zeroconf {
 
     /// Remove `addr` in my services that enabled `addr_auto`.
     fn del_addr_in_my_services(&mut self, addr: &Ipv4Addr) {
-        for (_, service_info) in self.my_services.iter_mut() {
+        for (_, (service_info, _broadcasted)) in self.my_services.iter_mut() {
             if service_info.is_addr_auto() {
                 service_info.remove_ipv4addr(addr);
             }
@@ -812,7 +816,7 @@ impl Zeroconf {
             next_time,
             command: Command::RegisterResend(service_fullname.clone(), 8),
         });
-        self.my_services.insert(service_fullname, info);
+        self.my_services.insert(service_fullname, (info, false));
     }
 
     /// Sends out annoucement of `info` on every valid interface.
@@ -1304,13 +1308,16 @@ impl Zeroconf {
 
             // TODO(mcginty): don't bother responding until the initial resends are done.
             if qtype == TYPE_PTR {
-                for service in self.my_services.values() {
+                for (service, broadcasted) in self.my_services.values() {
                     if question.entry.name == service.get_type()
                         || service
                             .get_subtype()
                             .as_ref()
                             .map_or(false, |v| v == &question.entry.name)
                     {
+                        if !broadcasted {
+                            continue;
+                        }
                         out.add_answer_with_additionals(&msg, service, &intf_sock.intf);
                     } else if question.entry.name == META_QUERY {
                         let ptr_added = out.add_answer(
@@ -1330,8 +1337,11 @@ impl Zeroconf {
                 }
             } else {
                 if qtype == TYPE_A || qtype == TYPE_ANY {
-                    for service in self.my_services.values() {
+                    for (service, broadcasted) in self.my_services.values() {
                         if service.get_hostname() == question.entry.name.to_lowercase() {
+                            if !broadcasted {
+                                continue;
+                            }
                             debug!("question matches our hostname {}", service.get_hostname());
                             let intf_addrs = service.get_addrs_on_intf(&intf_sock.intf);
                             if intf_addrs.is_empty() && qtype == TYPE_A {
@@ -1359,8 +1369,8 @@ impl Zeroconf {
 
                 let name_to_find = question.entry.name.to_lowercase();
                 let service = match self.my_services.get(&name_to_find) {
-                    Some(s) => s,
-                    None => continue,
+                    Some((s, broadcasted)) if *broadcasted => s,
+                    _ => continue,
                 };
 
                 if qtype == TYPE_SRV || qtype == TYPE_ANY {
