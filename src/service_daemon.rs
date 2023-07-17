@@ -460,7 +460,7 @@ impl ServiceDaemon {
                         error!("unregister: cannot find such service {}", &fullname);
                         UnregisterStatus::NotFound
                     }
-                    Some((_k, (info, _broacasted))) => {
+                    Some((_k, (info, _broadcasted))) => {
                         for (ipv4, intf_sock) in zc.intf_socks.iter() {
                             let packet = zc.unregister_service(&info, intf_sock);
                             // repeat for one time just in case some peers miss the message
