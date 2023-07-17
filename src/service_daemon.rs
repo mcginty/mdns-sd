@@ -39,6 +39,12 @@ use crate::{
     error::{Error, Result},
     service_info::{split_sub_domain, ServiceInfo},
 };
+use governor::{
+    clock::DefaultClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use if_addrs::{IfAddr, Ifv4Addr};
 use polling::Poller;
 use rand::prelude::*;
@@ -93,6 +99,7 @@ enum Counter {
     Respond,
     CacheRefreshQuery,
     QuerySent,
+    RateSuppressed,
 }
 
 impl fmt::Display for Counter {
@@ -453,12 +460,14 @@ impl ServiceDaemon {
                         for (ipv4, intf_sock) in zc.intf_socks.iter() {
                             let packet = zc.unregister_service(&info, intf_sock);
                             // repeat for one time just in case some peers miss the message
-                            if !repeating && !packet.is_empty() {
-                                let next_time = current_time_millis() + 120;
-                                zc.retransmissions.push(ReRun {
-                                    next_time,
-                                    command: Command::UnregisterResend(packet, *ipv4),
-                                });
+                            if !repeating {
+                                if let Some(packet) = packet {
+                                    let next_time = current_time_millis() + 120;
+                                    zc.retransmissions.push(ReRun {
+                                        next_time,
+                                        command: Command::UnregisterResend(packet, *ipv4),
+                                    });
+                                }
                             }
                         }
                         zc.increase_counter(Counter::Unregister, 1);
@@ -595,6 +604,7 @@ struct Zeroconf {
     /// Well-known mDNS IPv4 address and port
     broadcast_addr: SockAddr,
 
+    /// Cached records as expected by spec-compliant mDNS implementations.
     cache: DnsCache,
 
     /// Active "Browse" commands.
@@ -603,6 +613,7 @@ struct Zeroconf {
     /// All repeating transmissions.
     retransmissions: Vec<ReRun>,
 
+    /// A collection of potentially helpful metrics for diagnostics.
     counters: RefCell<Metrics>,
 
     /// Waits for incoming packets.
@@ -616,6 +627,10 @@ struct Zeroconf {
 
     /// A cached RNG for quick jitter
     rng: SmallRng,
+
+    /// A "global" rate limiter, designed to prevent any peer from unintentionally
+    /// triggering DoS situations in larger networks.
+    rate_limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>,
 }
 
 impl Zeroconf {
@@ -654,6 +669,7 @@ impl Zeroconf {
             monitors,
             service_name_len_max,
             rng: SmallRng::from_entropy(),
+            rate_limiter: RateLimiter::direct(Quota::per_second(15u32.try_into().unwrap())),
         })
     }
 
@@ -887,7 +903,7 @@ impl Zeroconf {
         true
     }
 
-    fn unregister_service(&self, info: &ServiceInfo, intf_sock: &IntfSock) -> Vec<u8> {
+    fn unregister_service(&self, info: &ServiceInfo, intf_sock: &IntfSock) -> Option<Vec<u8>> {
         let mut out = DnsOutgoing::new(FLAGS_QR_RESPONSE | FLAGS_AA);
         out.add_answer_at_time(
             Box::new(DnsPointer::new(
@@ -961,7 +977,11 @@ impl Zeroconf {
     }
 
     /// Sends an outgoing packet, and returns the packet bytes.
-    fn send(&self, out: &DnsOutgoing, addr: &SockAddr, intf: &IntfSock) -> Vec<u8> {
+    fn send(&self, out: &DnsOutgoing, addr: &SockAddr, intf: &IntfSock) -> Option<Vec<u8>> {
+        if self.rate_limiter.check().is_err() {
+            self.increase_counter(Counter::RateSuppressed, 1);
+            return None;
+        }
         let qtype = if out.is_query() { "query" } else { "response" };
         debug!(
             "Sending {} to {:?}: {} questions {} answers {} authorities {} additional",
@@ -975,11 +995,11 @@ impl Zeroconf {
         let packet = out.to_packet_data();
         if packet.len() > MAX_MSG_ABSOLUTE {
             error!("Drop over-sized packet ({})", packet.len());
-            return Vec::new();
+            return None;
         }
 
         send_packet(&packet[..], addr, intf);
-        packet
+        Some(packet)
     }
 
     fn send_query(&self, name: &str, qtype: u16) {

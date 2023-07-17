@@ -2,7 +2,7 @@
 name = "mdns-sd"
 version = "0.7.3"
 authors = ["keepsimple <keepsimple@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/keepsimple1/mdns-sd"
 documentation = "https://docs.rs/mdns-sd"
@@ -17,6 +17,7 @@ default = ["logging"]
 [dependencies]
 if-addrs = "0.7"                                       # get local IP addresses
 log = { version = "0.4.14", optional = true }          # logging
+governor = { version = "0.6", default-features = false, features = ["std"] }
 polling = "2.1"                                        # select/poll sockets
 socket2 = { version = "0.4", features = ["all"] }      # socket APIs
 rand = { version = "0.8", default_features = false, features = ["small_rng", "getrandom"] }
