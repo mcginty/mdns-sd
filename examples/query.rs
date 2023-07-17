@@ -31,10 +31,10 @@ fn main() {
 
     // Browse for a service type.
     service_type.push_str(".local.");
-    let receiver = mdns.browse(&service_type).expect("Failed to browse");
+    let mut receiver = mdns.browse(&service_type).expect("Failed to browse");
 
     let now = std::time::Instant::now();
-    while let Ok(event) = receiver.recv() {
+    while let Some(event) = receiver.blocking_recv() {
         match event {
             ServiceEvent::ServiceResolved(info) => {
                 println!(
@@ -51,8 +51,8 @@ fn main() {
                 println!("At {:?} : {:?}", now.elapsed(), &other_event);
             }
         }
-        let rx = mdns.get_metrics().unwrap();
-        let metrics = rx.recv().unwrap();
+        let mut rx = mdns.get_metrics().unwrap();
+        let metrics = rx.blocking_recv().unwrap();
         println!("Metrics:");
         for (name, value) in metrics {
             println!("  {name}: {value}");

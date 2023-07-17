@@ -55,9 +55,9 @@ fn integration_success() {
     let stopped_count = Arc::new(Mutex::new(0));
     let stopped_count_clone = stopped_count.clone();
 
-    let browse_chan = d.browse(ty_domain).unwrap();
+    let mut browse_chan = d.browse(ty_domain).unwrap();
     std::thread::spawn(move || {
-        while let Ok(event) = browse_chan.recv() {
+        while let Some(event) = browse_chan.blocking_recv() {
             match event {
                 ServiceEvent::SearchStarted(ty_domain) => {
                     println!("Search started for {}", &ty_domain);
@@ -134,8 +134,8 @@ fn integration_success() {
     sleep(Duration::from_millis(1200));
 
     // Unregister the service
-    let receiver = d.unregister(&fullname).unwrap();
-    let response = receiver.recv().unwrap();
+    let mut receiver = d.unregister(&fullname).unwrap();
+    let response = receiver.blocking_recv().unwrap();
     assert!(matches!(response, UnregisterStatus::OK));
 
     sleep(Duration::from_secs(1));
@@ -155,8 +155,8 @@ fn integration_success() {
     assert_eq!(*count, 1);
 
     // Verify metrics.
-    let metrics_receiver = d.get_metrics().unwrap();
-    let metrics = metrics_receiver.recv().unwrap();
+    let mut metrics_receiver = d.get_metrics().unwrap();
+    let metrics = metrics_receiver.blocking_recv().unwrap();
     println!("metrics: {:?}", &metrics);
     assert_eq!(metrics["register"], 1);
     assert_eq!(metrics["unregister"], 1);
@@ -182,12 +182,11 @@ fn integration_success() {
 
     // Browse using the special meta-query.
     let meta_query = "_services._dns-sd._udp.local.";
-    let browse_chan = d.browse(meta_query).unwrap();
-    let timeout = Duration::from_secs(2);
+    let mut browse_chan = d.browse(meta_query).unwrap();
 
     loop {
-        match browse_chan.recv_timeout(timeout) {
-            Ok(event) => match event {
+        match browse_chan.blocking_recv() {
+            Some(event) => match event {
                 ServiceEvent::ServiceFound(ty_domain, fullname) => {
                     println!("Found a service of {}: {}", &ty_domain, &fullname);
                     // Among all services found, should have our 2nd service.
@@ -200,8 +199,8 @@ fn integration_success() {
                     sleep(Duration::from_millis(100));
                 }
             },
-            Err(e) => {
-                println!("browse error: {}", e);
+            None => {
+                println!("browse error");
                 assert!(false);
             }
         }
@@ -243,11 +242,10 @@ fn service_without_properties_with_alter_net() {
     println!("Registered service with host_ipv4: {:?}", &host_ipv4);
 
     // Browse for a service
-    let browse_chan = d.browse(ty_domain).unwrap();
-    let timeout = Duration::from_secs(2);
+    let mut browse_chan = d.browse(ty_domain).unwrap();
     loop {
-        match browse_chan.recv_timeout(timeout) {
-            Ok(event) => match event {
+        match browse_chan.blocking_recv() {
+            Some(event) => match event {
                 ServiceEvent::ServiceResolved(info) => {
                     println!(
                         "Resolved a service of {} addr(s): {:?}",
@@ -263,8 +261,8 @@ fn service_without_properties_with_alter_net() {
                     println!("Received event {:?}", e);
                 }
             },
-            Err(e) => {
-                println!("browse error: {}", e);
+            None => {
+                println!("browse error");
                 assert!(false);
             }
         }
@@ -381,12 +379,11 @@ fn service_with_invalid_addr() {
         .expect("Failed to register our service");
 
     // Browse for a service
-    let browse_chan = d.browse(ty_domain).unwrap();
-    let timeout = Duration::from_secs(2);
+    let mut browse_chan = d.browse(ty_domain).unwrap();
     let mut resolved = false;
     loop {
-        match browse_chan.recv_timeout(timeout) {
-            Ok(event) => match event {
+        match browse_chan.blocking_recv() {
+            Some(event) => match event {
                 ServiceEvent::ServiceResolved(info) => {
                     println!(
                         "Resolved a service of {} addr(s): {:?}",
@@ -400,8 +397,8 @@ fn service_with_invalid_addr() {
                     println!("Received event {:?}", e);
                 }
             },
-            Err(e) => {
-                println!("browse error: {}", e);
+            None => {
+                println!("browse error");
                 break;
             }
         }
@@ -444,11 +441,10 @@ fn subtype() {
 
     // Browse for the service via ty_domain and subtype_domain
     for domain in [ty_domain, subtype_domain].iter() {
-        let browse_chan = d.browse(domain).unwrap();
-        let timeout = Duration::from_secs(2);
+        let mut browse_chan = d.browse(domain).unwrap();
         loop {
-            match browse_chan.recv_timeout(timeout) {
-                Ok(event) => match event {
+            match browse_chan.blocking_recv() {
+                Some(event) => match event {
                     ServiceEvent::ServiceResolved(info) => {
                         println!("Resolved a service of {}", &info.get_fullname());
                         assert_eq!(fullname.as_str(), info.get_fullname());
@@ -458,8 +454,8 @@ fn subtype() {
                         println!("Received event {:?}", e);
                     }
                 },
-                Err(e) => {
-                    println!("browse error: {}", e);
+                None => {
+                    println!("browse error");
                     assert!(false);
                 }
             }
@@ -474,7 +470,7 @@ fn subtype() {
 fn service_name_check() {
     // Create a daemon for the server.
     let server_daemon = ServiceDaemon::new().expect("Failed to create server daemon");
-    let monitor = server_daemon.monitor().unwrap();
+    let mut monitor = server_daemon.monitor().unwrap();
     // Register a service with a name len > 15.
     let service_name_too_long = "_service-name-too-long._udp.local.";
     let host_ipv4 = "";
@@ -494,7 +490,7 @@ fn service_name_check() {
     assert!(result.is_ok());
 
     // Verify that the daemon reported error.
-    let event = monitor.recv_timeout(Duration::from_millis(500)).unwrap();
+    let event = monitor.blocking_recv().unwrap();
     assert!(matches!(event, DaemonEvent::Error(_)));
     match event {
         DaemonEvent::Error(e) => println!("Daemon error: {}", e),
@@ -507,7 +503,7 @@ fn service_name_check() {
     assert!(result.is_ok());
 
     // Verify that the service was published successfully.
-    let event = monitor.recv_timeout(Duration::from_millis(500)).unwrap();
+    let event = monitor.blocking_recv().unwrap();
     assert!(matches!(event, DaemonEvent::Announce(_, _)));
 
     // Check for the internal upper limit of service name length max.
@@ -523,7 +519,7 @@ fn service_new_publish_after_browser() {
     let daemon = ServiceDaemon::new().expect("Failed to create a new daemon");
 
     // First, starts the browser.
-    let receiver = daemon.browse(service_type).unwrap();
+    let mut receiver = daemon.browse(service_type).unwrap();
 
     sleep(Duration::from_millis(1000));
 
@@ -544,10 +540,9 @@ fn service_new_publish_after_browser() {
     assert!(result.is_ok());
 
     let mut resolved = false;
-    let timeout = Duration::from_secs(2);
     loop {
-        match receiver.recv_timeout(timeout) {
-            Ok(event) => match event {
+        match receiver.blocking_recv() {
+            Some(event) => match event {
                 ServiceEvent::ServiceResolved(info) => {
                     println!(
                         "Resolved a service of {} addr(s): {:?} props: {:?}",
@@ -562,8 +557,8 @@ fn service_new_publish_after_browser() {
                     println!("Received event {:?}", e);
                 }
             },
-            Err(e) => {
-                println!("browse error: {}", e);
+            None => {
+                println!("browse error");
                 break;
             }
         }
@@ -578,7 +573,7 @@ fn service_new_publish_after_browser() {
 fn instance_name_two_dots() {
     // Create a daemon for the server.
     let server_daemon = ServiceDaemon::new().expect("Failed to create server daemon");
-    let monitor = server_daemon.monitor().unwrap();
+    let mut monitor = server_daemon.monitor().unwrap();
 
     // Register an instance name with a ending dot.
     // Then the full name will have two dots in the middle.
@@ -602,16 +597,15 @@ fn instance_name_two_dots() {
     assert!(result.is_ok());
 
     // Verify that the service was published successfully.
-    let event = monitor.recv_timeout(Duration::from_millis(500)).unwrap();
+    let event = monitor.blocking_recv().unwrap();
     assert!(matches!(event, DaemonEvent::Announce(_, _)));
 
     // Browseing the service.
-    let receiver = server_daemon.browse(service_type).unwrap();
+    let mut receiver = server_daemon.browse(service_type).unwrap();
     let mut resolved = false;
-    let timeout = Duration::from_secs(2);
     loop {
-        match receiver.recv_timeout(timeout) {
-            Ok(event) => match event {
+        match receiver.blocking_recv() {
+            Some(event) => match event {
                 ServiceEvent::ServiceResolved(_) => {
                     resolved = true;
                     break;
@@ -620,8 +614,8 @@ fn instance_name_two_dots() {
                     println!("Received event {:?}", e);
                 }
             },
-            Err(e) => {
-                println!("browse error: {}", e);
+            None => {
+                println!("browse error");
                 break;
             }
         }

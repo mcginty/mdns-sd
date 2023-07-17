@@ -69,7 +69,7 @@ fn main() {
     .enable_addr_auto();
 
     // Optionally, we can monitor the daemon events.
-    let monitor = mdns.monitor().expect("Failed to monitor the daemon");
+    let mut monitor = mdns.monitor().expect("Failed to monitor the daemon");
     let service_fullname = service_info.get_fullname().to_string();
     mdns.register(service_info)
         .expect("Failed to register mDNS service");
@@ -81,13 +81,13 @@ fn main() {
         println!("Sleeping {} seconds before unregister", wait_in_secs);
         thread::sleep(Duration::from_secs(wait_in_secs));
 
-        let receiver = mdns.unregister(&service_fullname).unwrap();
-        while let Ok(event) = receiver.recv() {
+        let mut receiver = mdns.unregister(&service_fullname).unwrap();
+        while let Some(event) = receiver.blocking_recv() {
             println!("unregister result: {:?}", &event);
         }
     } else {
         // Monitor the daemon events.
-        while let Ok(event) = monitor.recv() {
+        while let Some(event) = monitor.blocking_recv() {
             println!("Daemon event: {:?}", &event);
         }
     }

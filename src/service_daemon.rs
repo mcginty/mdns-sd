@@ -56,12 +56,11 @@ use std::{
     fmt,
     io::Read,
     net::{Ipv4Addr, SocketAddrV4},
-    str,
-    sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
-    thread,
+    str, thread,
     time::Duration,
     vec,
 };
+use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
 
 /// A simple macro to report all kinds of errors.
 macro_rules! e_fmt {
@@ -118,7 +117,7 @@ pub type Metrics = HashMap<String, i64>;
 #[derive(Clone)]
 pub struct ServiceDaemon {
     /// Sender handle of the channel to the daemon.
-    sender: SyncSender<Command>,
+    sender: Sender<Command>,
 }
 
 impl ServiceDaemon {
@@ -128,7 +127,7 @@ impl ServiceDaemon {
     /// ask callers to set the port.
     pub fn new() -> Result<Self> {
         let zc = Zeroconf::new()?;
-        let (sender, receiver) = sync_channel(100);
+        let (sender, receiver) = mpsc::channel(100);
 
         // Spawn the daemon thread
         // TODO(mcginty): migrate eventually to tokio instead of threads
@@ -149,7 +148,7 @@ impl ServiceDaemon {
     /// When a new instance is found, the daemon automatically tries to resolve, i.e.
     /// finding more details, i.e. SRV records and TXT records.
     pub fn browse(&self, service_type: &str) -> Result<Receiver<ServiceEvent>> {
-        let (resp_s, resp_r) = sync_channel(10);
+        let (resp_s, resp_r) = mpsc::channel(10);
         self.sender
             .try_send(Command::Browse(service_type.to_string(), 1, resp_s))
             .map_err(|e| match e {
@@ -203,7 +202,7 @@ impl ServiceDaemon {
     /// When an error is returned, the caller should retry only when
     /// the error is `Error::Again`, otherwise should log and move on.
     pub fn unregister(&self, fullname: &str) -> Result<Receiver<UnregisterStatus>> {
-        let (resp_s, resp_r) = sync_channel(1);
+        let (resp_s, resp_r) = mpsc::channel(1);
         self.sender
             .try_send(Command::Unregister(fullname.to_lowercase(), resp_s))
             .map_err(|e| match e {
@@ -217,7 +216,7 @@ impl ServiceDaemon {
     ///
     /// Returns a channel [`Receiver`] of [`DaemonEvent`].
     pub fn monitor(&self) -> Result<Receiver<DaemonEvent>> {
-        let (resp_s, resp_r) = sync_channel(100);
+        let (resp_s, resp_r) = mpsc::channel(100);
         self.sender
             .try_send(Command::Monitor(resp_s))
             .map_err(|e| match e {
@@ -243,7 +242,7 @@ impl ServiceDaemon {
     /// The metrics returned is a snapshot. Hence the caller should call
     /// this method repeatedly if they want to monitor the metrics continuously.
     pub fn get_metrics(&self) -> Result<Receiver<Metrics>> {
-        let (resp_s, resp_r) = sync_channel(1);
+        let (resp_s, resp_r) = mpsc::channel(1);
         self.sender
             .try_send(Command::GetMetrics(resp_s))
             .map_err(|e| match e {
@@ -285,7 +284,7 @@ impl ServiceDaemon {
     /// 3. try_recv on its channel and execute commands.
     /// 4. announce its registered services.
     /// 5. process retransmissions if any.
-    fn run(mut zc: Zeroconf, receiver: Receiver<Command>) {
+    fn run(mut zc: Zeroconf, mut receiver: Receiver<Command>) {
         for (ipv4, if_sock) in zc.intf_socks.iter() {
             // It is OK to convert to `usize` here as we only support 32-bit
             // or 64-bit platforms.
@@ -388,7 +387,7 @@ impl ServiceDaemon {
         match command {
             Command::Browse(ty, next_delay, listener) => {
                 let addr_list: Vec<_> = zc.intf_socks.keys().collect();
-                if let Err(e) = listener.send(ServiceEvent::SearchStarted(format!(
+                if let Err(e) = listener.try_send(ServiceEvent::SearchStarted(format!(
                     "{} on addrs {:?}",
                     &ty, &addr_list
                 ))) {
@@ -478,7 +477,7 @@ impl ServiceDaemon {
                         UnregisterStatus::OK
                     }
                 };
-                if let Err(e) = resp_s.send(response) {
+                if let Err(e) = resp_s.try_send(response) {
                     error!("unregister: failed to send response: {}", e);
                 }
             }
@@ -509,14 +508,14 @@ impl ServiceDaemon {
                     }
 
                     // Notify the client.
-                    match sender.send(ServiceEvent::SearchStopped(ty_domain)) {
+                    match sender.try_send(ServiceEvent::SearchStopped(ty_domain)) {
                         Ok(()) => debug!("Sent SearchStopped to the listener"),
                         Err(e) => error!("Failed to send SearchStopped: {}", e),
                     }
                 }
             },
 
-            Command::GetMetrics(resp_s) => match resp_s.send(zc.counters.borrow().clone()) {
+            Command::GetMetrics(resp_s) => match resp_s.try_send(zc.counters.borrow().clone()) {
                 Ok(()) => debug!("Sent metrics to the client"),
                 Err(e) => error!("Failed to send metrics: {}", e),
             },
@@ -612,7 +611,7 @@ struct Zeroconf {
     cache: DnsCache,
 
     /// Active "Browse" commands.
-    queriers: HashMap<String, SyncSender<ServiceEvent>>, // <ty_domain, channel::sender>
+    queriers: HashMap<String, Sender<ServiceEvent>>, // <ty_domain, channel::sender>
 
     /// All repeating transmissions.
     retransmissions: Vec<ReRun>,
@@ -624,7 +623,7 @@ struct Zeroconf {
     poller: Poller,
 
     /// Channels to notify events.
-    monitors: Vec<SyncSender<DaemonEvent>>,
+    monitors: Vec<Sender<DaemonEvent>>,
 
     /// Options
     service_name_len_max: u8,
@@ -688,7 +687,7 @@ impl Zeroconf {
         self.monitors.retain(|sender| {
             if let Err(e) = sender.try_send(event.clone()) {
                 error!("notify_monitors: try_send: {}", &e);
-                if matches!(e, TrySendError::Disconnected(_)) {
+                if matches!(e, TrySendError::Closed(_)) {
                     return false; // This monitor is dropped.
                 }
             }
@@ -976,7 +975,7 @@ impl Zeroconf {
     /// Binds a channel `listener` to querying mDNS domain type `ty`.
     ///
     /// If there is already a `listener`, it will be updated, i.e. overwritten.
-    fn add_querier(&mut self, ty: String, listener: SyncSender<ServiceEvent>) {
+    fn add_querier(&mut self, ty: String, listener: Sender<ServiceEvent>) {
         self.queriers.insert(ty, listener);
     }
 
@@ -1075,7 +1074,7 @@ impl Zeroconf {
 
     /// Checks if `ty_domain` has records in the cache. If yes, sends the
     /// cached records via `sender`.
-    fn query_cache(&mut self, ty_domain: &str, sender: SyncSender<ServiceEvent>) {
+    fn query_cache(&mut self, ty_domain: &str, sender: Sender<ServiceEvent>) {
         if let Some(records) = self.cache.ptr.get(ty_domain) {
             for record in records.iter() {
                 if let Some(ptr) = record.any().downcast_ref::<DnsPointer>() {
@@ -1088,7 +1087,7 @@ impl Zeroconf {
                         }
                     };
 
-                    match sender.send(ServiceEvent::ServiceFound(
+                    match sender.try_send(ServiceEvent::ServiceFound(
                         ty_domain.to_string(),
                         ptr.alias.clone(),
                     )) {
@@ -1100,7 +1099,7 @@ impl Zeroconf {
                     }
 
                     if info.is_ready() {
-                        match sender.send(ServiceEvent::ServiceResolved(info)) {
+                        match sender.try_send(ServiceEvent::ServiceResolved(info)) {
                             Ok(()) => debug!("sent service resolved"),
                             Err(e) => error!("failed to send service resolved: {}", e),
                         }
@@ -1486,13 +1485,13 @@ pub enum DaemonEvent {
 #[derive(Debug)]
 enum Command {
     /// Browsing for a service type (ty_domain, next_time_delay_in_seconds, channel::sender)
-    Browse(String, u32, SyncSender<ServiceEvent>),
+    Browse(String, u32, Sender<ServiceEvent>),
 
     /// Register a service
     Register(ServiceInfo),
 
     /// Unregister a service
-    Unregister(String, SyncSender<UnregisterStatus>), // (fullname)
+    Unregister(String, Sender<UnregisterStatus>), // (fullname)
 
     /// Announce again a service to local network
     RegisterResend(String, usize), // (fullname)
@@ -1504,10 +1503,10 @@ enum Command {
     StopBrowse(String), // (ty_domain)
 
     /// Read the current values of the counters
-    GetMetrics(SyncSender<Metrics>),
+    GetMetrics(Sender<Metrics>),
 
     /// Monitor noticable events in the daemon.
-    Monitor(SyncSender<DaemonEvent>),
+    Monitor(Sender<DaemonEvent>),
 
     SetOption(DaemonOption),
 
@@ -1715,12 +1714,12 @@ fn check_service_name(fullname: &str) -> Result<()> {
 }
 
 fn call_listener(
-    listeners_map: &HashMap<String, SyncSender<ServiceEvent>>,
+    listeners_map: &HashMap<String, Sender<ServiceEvent>>,
     ty_domain: &str,
     event: ServiceEvent,
 ) {
     if let Some(listener) = listeners_map.get(ty_domain) {
-        match listener.send(event) {
+        match listener.try_send(event) {
             Ok(()) => debug!("Sent event to listener successfully"),
             Err(e) => error!("Failed to send event: {}", e),
         }
