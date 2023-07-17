@@ -93,7 +93,6 @@ enum Counter {
     Respond,
     CacheRefreshQuery,
     QuerySent,
-    QueryMissingSrv,
 }
 
 impl fmt::Display for Counter {
@@ -1724,24 +1723,5 @@ fn send_packet(packet: &[u8], addr: &SockAddr, intf_sock: &IntfSock) {
             "send to {:?} via interface {:?} failed: {}",
             addr, &intf_sock.intf, e
         ),
-    }
-}
-
-/// Returns true if `name` is a valid instance name of format:
-/// <instance>.<service_type>.<_udp|_tcp>.local.
-/// Note: <instance> could contain '.' as well.
-fn valid_instance_name(name: &str) -> bool {
-    name.split('.').count() >= 5
-}
-
-#[cfg(test)]
-mod tests {
-    use super::valid_instance_name;
-
-    #[test]
-    fn test_instance_name() {
-        assert_eq!(valid_instance_name("my-laser._printer._tcp.local."), true);
-        assert_eq!(valid_instance_name("my-laser.._printer._tcp.local."), true);
-        assert_eq!(valid_instance_name("_printer._tcp.local."), false);
     }
 }

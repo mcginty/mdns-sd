@@ -91,10 +91,6 @@ impl DnsRecord {
         }
     }
 
-    pub(crate) fn get_created(&self) -> u64 {
-        self.created
-    }
-
     pub(crate) fn is_expired(&self, now: u64) -> bool {
         get_expiration_time(self.created, self.ttl, 100) <= now
     }
