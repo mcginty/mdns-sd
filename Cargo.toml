@@ -21,7 +21,7 @@ governor = { version = "0.6", default-features = false, features = ["std"] }
 polling = "2.1"                                        # select/poll sockets
 socket2 = { version = "0.4", features = ["all"] }      # socket APIs
 rand = { version = "0.8", default_features = false, features = ["small_rng", "getrandom"] }
-tokio = { version = "1.29", default-features = false, features = ["sync"] }
+tokio = { version = "1.0", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 fastrand = "1.8"
