@@ -29,7 +29,7 @@
 // in Service Discovery, the basic data structure is "Service Info". One Service Info
 // corresponds to a set of DNS Resource Records.
 #[cfg(feature = "logging")]
-use crate::log::{debug, error};
+use crate::log::{debug, error, warn};
 use crate::{
     dns_parser::{
         current_time_millis, DnsAddress, DnsIncoming, DnsOutgoing, DnsPointer, DnsRecordBox,
@@ -391,7 +391,7 @@ impl ServiceDaemon {
                     "{} on addrs {:?}",
                     &ty, &addr_list
                 ))) {
-                    error!(
+                    warn!(
                         "Failed to send SearchStarted({}) (repeating:{}): {}",
                         &ty, repeating, e
                     );
@@ -456,7 +456,7 @@ impl ServiceDaemon {
                 debug!("unregister service {} repeat {}", &fullname, &repeating);
                 let response = match zc.my_services.remove_entry(&fullname) {
                     None => {
-                        error!("unregister: cannot find such service {}", &fullname);
+                        warn!("unregister: cannot find such service {}", &fullname);
                         UnregisterStatus::NotFound
                     }
                     Some((_k, (info, _broadcasted))) => {
@@ -478,7 +478,7 @@ impl ServiceDaemon {
                     }
                 };
                 if let Err(e) = resp_s.try_send(response) {
-                    error!("unregister: failed to send response: {}", e);
+                    warn!("unregister: failed to send response: {}", e);
                 }
             }
 
@@ -491,7 +491,7 @@ impl ServiceDaemon {
             }
 
             Command::StopBrowse(ty_domain) => match zc.queriers.remove_entry(&ty_domain) {
-                None => error!("StopBrowse: cannot find querier for {}", &ty_domain),
+                None => warn!("StopBrowse: cannot find querier for {}", &ty_domain),
                 Some((ty, sender)) => {
                     // Remove pending browse commands in the reruns.
                     debug!("StopBrowse: removed queryer for {}", &ty);
@@ -510,14 +510,14 @@ impl ServiceDaemon {
                     // Notify the client.
                     match sender.try_send(ServiceEvent::SearchStopped(ty_domain)) {
                         Ok(()) => debug!("Sent SearchStopped to the listener"),
-                        Err(e) => error!("Failed to send SearchStopped: {}", e),
+                        Err(e) => warn!("Failed to send SearchStopped: {}", e),
                     }
                 }
             },
 
             Command::GetMetrics(resp_s) => match resp_s.try_send(zc.counters.borrow().clone()) {
                 Ok(()) => debug!("Sent metrics to the client"),
-                Err(e) => error!("Failed to send metrics: {}", e),
+                Err(e) => warn!("Failed to send metrics: {}", e),
             },
 
             Command::Monitor(resp_s) => {
@@ -529,7 +529,7 @@ impl ServiceDaemon {
             }
 
             _ => {
-                error!("unexpected command: {:?}", &command);
+                warn!("unexpected command: {:?}", &command);
             }
         }
     }
@@ -686,7 +686,7 @@ impl Zeroconf {
         // Only retain the monitors that are still connected.
         self.monitors.retain(|sender| {
             if let Err(e) = sender.try_send(event.clone()) {
-                error!("notify_monitors: try_send: {}", &e);
+                warn!("notify_monitors: try_send: {}", &e);
                 if matches!(e, TrySendError::Closed(_)) {
                     return false; // This monitor is dropped.
                 }
@@ -790,7 +790,7 @@ impl Zeroconf {
     fn register_service(&mut self, info: ServiceInfo) {
         // Check the service name length.
         if let Err(e) = check_service_name_length(info.get_type(), self.service_name_len_max) {
-            error!("check_service_name_length: {}", &e);
+            warn!("check_service_name_length: {}", &e);
             self.notify_monitors(DaemonEvent::Error(e));
             return;
         }
@@ -997,7 +997,7 @@ impl Zeroconf {
         );
         let packet = out.to_packet_data();
         if packet.len() > MAX_MSG_ABSOLUTE {
-            error!("Drop over-sized packet ({})", packet.len());
+            warn!("Drop over-sized packet ({})", packet.len());
             return None;
         }
 
@@ -1029,7 +1029,7 @@ impl Zeroconf {
             Ok(sz) => sz,
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::WouldBlock {
-                    error!("listening socket read failed: {}", e);
+                    warn!("listening socket read failed: {}", e);
                 }
                 return false;
             }
@@ -1063,10 +1063,10 @@ impl Zeroconf {
                 } else if msg.is_response() {
                     self.handle_response(msg);
                 } else {
-                    error!("Invalid message: not query and not response");
+                    warn!("Invalid message: not query and not response");
                 }
             }
-            Err(e) => error!("Invalid incoming message: {}", e),
+            Err(e) => warn!("Invalid incoming message: {}", e),
         }
 
         true
@@ -1082,7 +1082,7 @@ impl Zeroconf {
                     let info = match info {
                         Ok(ok) => ok,
                         Err(err) => {
-                            error!("Error while creating service info from cache: {}", err);
+                            warn!("Error while creating service info from cache: {}", err);
                             continue;
                         }
                     };
@@ -1093,7 +1093,7 @@ impl Zeroconf {
                     )) {
                         Ok(()) => debug!("send service found {}", &ptr.alias),
                         Err(e) => {
-                            error!("failed to send service found: {}", e);
+                            warn!("failed to send service found: {}", e);
                             continue;
                         }
                     }
@@ -1101,7 +1101,7 @@ impl Zeroconf {
                     if info.is_ready() {
                         match sender.try_send(ServiceEvent::ServiceResolved(info)) {
                             Ok(()) => debug!("sent service resolved"),
-                            Err(e) => error!("failed to send service resolved: {}", e),
+                            Err(e) => warn!("failed to send service resolved: {}", e),
                         }
                     }
                 }
@@ -1721,7 +1721,7 @@ fn call_listener(
     if let Some(listener) = listeners_map.get(ty_domain) {
         match listener.try_send(event) {
             Ok(()) => debug!("Sent event to listener successfully"),
-            Err(e) => error!("Failed to send event: {}", e),
+            Err(e) => warn!("Failed to send event: {}", e),
         }
     }
 }
@@ -1748,7 +1748,7 @@ fn my_ipv4_interfaces() -> Vec<Ifv4Addr> {
 fn send_packet(packet: &[u8], addr: &SockAddr, intf_sock: &IntfSock) {
     match intf_sock.sock.send_to(packet, addr) {
         Ok(sz) => debug!("sent out {} bytes on interface {:?}", sz, &intf_sock.intf),
-        Err(e) => error!(
+        Err(e) => warn!(
             "send to {:?} via interface {:?} failed: {}",
             addr, &intf_sock.intf, e
         ),
