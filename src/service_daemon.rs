@@ -28,27 +28,6 @@
 // In mDNS and DNS, the basic data structure is "Resource Record" (RR), where
 // in Service Discovery, the basic data structure is "Service Info". One Service Info
 // corresponds to a set of DNS Resource Records.
-#[cfg(feature = "logging")]
-use crate::log::{debug, error, warn};
-use crate::{
-    dns_parser::{
-        current_time_millis, DnsAddress, DnsIncoming, DnsOutgoing, DnsPointer, DnsRecordBox,
-        DnsRecordExt, DnsSrv, DnsTxt, CLASS_IN, CLASS_UNIQUE, FLAGS_AA, FLAGS_QR_QUERY,
-        FLAGS_QR_RESPONSE, MAX_MSG_ABSOLUTE, TYPE_A, TYPE_ANY, TYPE_PTR, TYPE_SRV, TYPE_TXT,
-    },
-    error::{Error, Result},
-    service_info::{split_sub_domain, ServiceInfo},
-};
-use governor::{
-    clock::DefaultClock,
-    middleware::NoOpMiddleware,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
-};
-use if_addrs::{IfAddr, Ifv4Addr};
-use polling::Poller;
-use rand::prelude::*;
-use socket2::{SockAddr, Socket};
 use std::{
     cell::RefCell,
     cmp,
@@ -60,7 +39,30 @@ use std::{
     time::Duration,
     vec,
 };
+
+use governor::{
+    clock::DefaultClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
+use if_addrs::{IfAddr, Ifv4Addr};
+use polling::Poller;
+use rand::prelude::*;
+use socket2::{SockAddr, Socket};
 use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
+
+#[cfg(feature = "logging")]
+use crate::log::{debug, error, warn};
+use crate::{
+    dns_parser::{
+        current_time_millis, DnsAddress, DnsIncoming, DnsOutgoing, DnsPointer, DnsRecordBox,
+        DnsRecordExt, DnsSrv, DnsTxt, CLASS_IN, CLASS_UNIQUE, FLAGS_AA, FLAGS_QR_QUERY,
+        FLAGS_QR_RESPONSE, MAX_MSG_ABSOLUTE, TYPE_A, TYPE_ANY, TYPE_PTR, TYPE_SRV, TYPE_TXT,
+    },
+    error::{Error, Result},
+    service_info::{split_sub_domain, ServiceInfo},
+};
 
 /// A simple macro to report all kinds of errors.
 macro_rules! e_fmt {
@@ -1318,6 +1320,40 @@ impl Zeroconf {
                             continue;
                         }
                         out.add_answer_with_additionals(&msg, service, &intf_sock.intf);
+                    } else if question.entry.name.ends_with(".in-addr.arpa.") {
+                        // Reverse DNS lookup for IPv4
+                        let Some(query_ip) =
+                            get_ip_from_ipv4_reverse_dns_query(&question.entry.name)
+                        else {
+                            debug!(
+                                "answer was not added for reverse DNS query - invalid query IP \
+                                 {:?}",
+                                &question
+                            );
+                            continue;
+                        };
+
+                        if !service.get_addresses().contains(&query_ip) {
+                            debug!(
+                                "answer was not added for reverse DNS query - no matching IP {:?}",
+                                &question
+                            );
+                            continue;
+                        }
+
+                        let ptr_added = out.add_answer(
+                            &msg,
+                            Box::new(DnsPointer::new(
+                                &question.entry.name,
+                                TYPE_PTR,
+                                CLASS_IN,
+                                service.get_other_ttl(),
+                                service.get_hostname().to_string(),
+                            )),
+                        );
+                        if !ptr_added {
+                            debug!("answer was not added for reverse DNS query {:?}", &question);
+                        }
                     } else if question.entry.name == META_QUERY {
                         let ptr_added = out.add_answer(
                             &msg,
@@ -1752,5 +1788,47 @@ fn send_packet(packet: &[u8], addr: &SockAddr, intf_sock: &IntfSock) {
             "send to {:?} via interface {:?} failed: {}",
             addr, &intf_sock.intf, e
         ),
+    }
+}
+
+/// Extract the IPv4 address from a reverse DNS query
+/// Input should ends with ".in-addr.arpa."
+fn get_ip_from_ipv4_reverse_dns_query(query: &str) -> Option<Ipv4Addr> {
+    let reversed_ip = query.trim_end_matches(".in-addr.arpa.");
+    let parts: std::result::Result<Vec<_>, _> = reversed_ip
+        .split_terminator('.')
+        .map(|val| val.parse::<u8>())
+        .collect();
+
+    let ip_parts = parts.ok()?;
+    if ip_parts.len() != 4 {
+        return None;
+    }
+    let ret = Ipv4Addr::new(ip_parts[3], ip_parts[2], ip_parts[1], ip_parts[0]);
+
+    Some(ret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extracting_ip() {
+        let cases = [
+            (
+                "5.1.168.192.in-addr.arpa.",
+                Some(Ipv4Addr::new(192, 168, 1, 5)),
+            ),
+            ("4.4.8.8.in-addr.arpa.", Some(Ipv4Addr::new(8, 8, 4, 4))),
+            ("3.5.1.168.192.in-addr.arpa.", None),
+            ("1000.1.168.192.in-addr.arpa.", None),
+            ("invalid.in-addr.arpa.", None),
+        ];
+
+        for (query, expected) in cases {
+            let ret = get_ip_from_ipv4_reverse_dns_query(query);
+            assert_eq!(ret, expected);
+        }
     }
 }
